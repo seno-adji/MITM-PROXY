@@ -1,4 +1,5 @@
 sudo: false
+
 language: python
 
 branches:
@@ -29,6 +30,14 @@ matrix:
       env: TOXENV=py36
     - python: 3.6
       env: TOXENV=individual_coverage
+    - python: 3.6
+      env: TOXENV=smoke
+      addons:
+        chrome: stable
+        firefox: latest
+        apt:
+          packages:
+            - libnss3-tools
     - language: node_js
       node_js: "node"
       before_install:
