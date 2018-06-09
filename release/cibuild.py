@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 
-import glob
-import re
 import contextlib
+import glob
 import os
+import pathlib
 import platform
-import sys
+import re
 import shutil
 import subprocess
+import sys
 import tarfile
+import urllib.request
 import zipfile
 
 import click
 import cryptography.fernet
+import parver
 
 
 @contextlib.contextmanager
@@ -37,26 +40,23 @@ class BuildEnviron:
     def __init__(
         self,
         *,
-        system = "",
-        root_dir = "",
-
-        travis_tag = "",
-        travis_branch = "",
-        travis_pull_request = "",
-
-        appveyor_repo_tag_name = "",
-        appveyor_repo_branch = "",
-        appveyor_pull_request_number = "",
-
-        should_build_wheel = False,
-        should_build_docker = False,
-        should_build_pyinstaller = False,
-
-        has_aws_creds = False,
-        has_twine_creds = False,
-
-        docker_username = "",
-        docker_password = "",
+        system="",
+        root_dir="",
+        travis_tag="",
+        travis_branch="",
+        travis_pull_request="",
+        appveyor_repo_tag_name="",
+        appveyor_repo_branch="",
+        appveyor_pull_request_number="",
+        should_build_wheel=False,
+        should_build_docker=False,
+        should_build_pyinstaller=False,
+        should_build_wininstaller=False,
+        has_aws_creds=False,
+        has_twine_creds=False,
+        docker_username="",
+        docker_password="",
+        rtool_key="",
     ):
         self.system = system
         self.root_dir = root_dir
@@ -68,6 +68,7 @@ class BuildEnviron:
         self.should_build_wheel = should_build_wheel
         self.should_build_docker = should_build_docker
         self.should_build_pyinstaller = should_build_pyinstaller
+        self.should_build_wininstaller = should_build_wininstaller
 
         self.appveyor_repo_tag_name = appveyor_repo_tag_name
         self.appveyor_repo_branch = appveyor_repo_branch
@@ -77,92 +78,32 @@ class BuildEnviron:
         self.has_twine_creds = has_twine_creds
         self.docker_username = docker_username
         self.docker_password = docker_password
+        self.rtool_key = rtool_key
 
     @classmethod
-    def from_env(klass):
-        return klass(
-            system = platform.system(),
-            root_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), "..")),
-
-            travis_tag = os.environ.get("TRAVIS_TAG", ""),
-            travis_branch = os.environ.get("TRAVIS_BRANCH", ""),
-            travis_pull_request = os.environ.get("TRAVIS_PULL_REQUEST"),
-
-            appveyor_repo_tag_name = os.environ.get("APPVEYOR_REPO_TAG_NAME", ""),
-            appveyor_repo_branch = os.environ.get("APPVEYOR_REPO_BRANCH", ""),
-            appveyor_pull_request_number = os.environ.get("APPVEYOR_PULL_REQUEST_NUMBER"),
-
-            should_build_wheel = "WHEEL" in os.environ,
-            should_build_pyinstaller = "PYINSTALLER" in os.environ,
-            should_build_docker = "DOCKER" in os.environ,
-
-            has_aws_creds = "AWS_ACCESS_KEY_ID" in os.environ,
-            has_twine_creds= (
+    def from_env(cls):
+        return cls(
+            system=platform.system(),
+            root_dir=os.path.normpath(os.path.join(os.path.dirname(__file__), "..")),
+            travis_tag=os.environ.get("TRAVIS_TAG", ""),
+            travis_branch=os.environ.get("TRAVIS_BRANCH", ""),
+            travis_pull_request=os.environ.get("TRAVIS_PULL_REQUEST"),
+            appveyor_repo_tag_name=os.environ.get("APPVEYOR_REPO_TAG_NAME", ""),
+            appveyor_repo_branch=os.environ.get("APPVEYOR_REPO_BRANCH", ""),
+            appveyor_pull_request_number=os.environ.get("APPVEYOR_PULL_REQUEST_NUMBER"),
+            should_build_wheel="WHEEL" in os.environ,
+            should_build_pyinstaller="PYINSTALLER" in os.environ,
+            should_build_wininstaller="WININSTALLER" in os.environ,
+            should_build_docker="DOCKER" in os.environ,
+            has_aws_creds="AWS_ACCESS_KEY_ID" in os.environ,
+            has_twine_creds=(
                 "TWINE_USERNAME" in os.environ and
                 "TWINE_PASSWORD" in os.environ
             ),
-
-            docker_username = os.environ.get("DOCKER_USERNAME"),
-            docker_password = os.environ.get("DOCKER_PASSWORD"),
+            docker_username=os.environ.get("DOCKER_USERNAME"),
+            docker_password=os.environ.get("DOCKER_PASSWORD"),
+            rtool_key=os.environ.get("RTOOL_KEY"),
         )
-
-    @property
-    def has_docker_creds(self) -> bool:
-        return self.docker_username and self.docker_password
-
-    @property
-    def is_pull_request(self) -> bool:
-        if self.appveyor_pull_request_number:
-            return True
-        if self.travis_pull_request and self.travis_pull_request != "false":
-            return True
-        return False
-
-    @property
-    def tag(self):
-        return self.travis_tag or self.appveyor_repo_tag_name
-
-    @property
-    def branch(self):
-        return self.travis_branch or self.appveyor_repo_branch
-
-    @property
-    def version(self):
-        name = self.tag or self.branch
-        if not name:
-            raise BuildError("We're on neither a tag nor a branch - could not establish version")
-        return re.sub('^v', "", name)
-
-    @property
-    def upload_dir(self):
-        if self.tag:
-            return self.version
-        else:
-            return "branches/%s" % self.version
-
-    @property
-    def platform_tag(self):
-        if self.system in self.PLATFORM_TAGS:
-            return self.PLATFORM_TAGS[self.system]
-        raise BuildError("Unsupported platform: %s" % self.system)
-
-    @property
-    def release_dir(self):
-        return os.path.join(self.root_dir, "release")
-
-    @property
-    def build_dir(self):
-        return os.path.join(self.release_dir, "build")
-
-    @property
-    def dist_dir(self):
-        return os.path.join(self.release_dir, "dist")
-
-    @property
-    def docker_tag(self):
-        if self.branch == "master":
-            return "dev"
-        return self.version
 
     def archive(self, path):
         # ZipFile and tarfile have slightly different APIs. Fix that.
@@ -196,18 +137,24 @@ class BuildEnviron:
         return ret
 
     @property
-    def should_upload_docker(self) -> bool:
-        return all([
-            (self.tag or self.branch == "master"),
-            self.should_build_docker,
-            self.has_docker_creds,
-        ])
+    def branch(self):
+        return self.travis_branch or self.appveyor_repo_branch
 
     @property
-    def should_upload_pypi(self) -> bool:
-        if self.tag and self.should_build_wheel and self.has_twine_creds:
-            return True
-        return False
+    def build_dir(self):
+        return os.path.join(self.release_dir, "build")
+
+    @property
+    def dist_dir(self):
+        return os.path.join(self.release_dir, "dist")
+
+    @property
+    def docker_tag(self):
+        if self.branch == "master":
+            t = "dev"
+        else:
+            t = self.version
+        return "mitmproxy/mitmproxy:{}".format(t)
 
     def dump_info(self, fp=sys.stdout):
         lst = [
@@ -228,7 +175,100 @@ class BuildEnviron:
             "should_upload_pypi",
         ]
         for attr in lst:
-            print("cibuild.%s=%s" % (attr, getattr(self, attr)), file=fp)
+            print(f"cibuild.{attr}={getattr(self, attr)}", file=fp)
+
+    def check_version(self) -> None:
+        """
+        Check that version numbers match our conventions.
+        Raises a ValueError if there is a mismatch.
+        """
+        with open(pathlib.Path(self.root_dir) / "mitmproxy" / "version.py") as f:
+            contents = f.read()
+
+        version = re.search(r'^VERSION = "(.+?)"', contents, re.M).group(1)
+
+        if self.tag:
+            # For (tagged) releases, we are strict:
+            #  1. The tagname must match the version in mitmproxy/version.py
+            #  2. The version info must be in canonical form (as recommended in PEP 440).
+
+            if version != self.tag:
+                raise ValueError(f"Tag is {self.tag}, but mitmproxy/version.py is {version}.")
+            try:
+                parver.Version.parse(version, strict=True)
+            except parver.ParseError as e:
+                raise ValueError(str(e)) from e
+        else:
+            # For snapshots, we only ensure that mitmproxy/version.py contains a dev release.
+            version_info = parver.Version.parse(version)
+            if not version_info.is_devrelease:
+                raise ValueError("Releases must be tagged.")
+
+    @property
+    def has_docker_creds(self) -> bool:
+        return bool(self.docker_username and self.docker_password)
+
+    @property
+    def is_prod_release(self) -> bool:
+        if not self.tag:
+            return False
+        try:
+            v = parver.Version.parse(self.version, strict=True)
+        except (parver.ParseError, BuildError):
+            return False
+        return not v.is_prerelease
+
+    @property
+    def is_pull_request(self) -> bool:
+        if self.appveyor_pull_request_number:
+            return True
+        if self.travis_pull_request and self.travis_pull_request != "false":
+            return True
+        return False
+
+    @property
+    def platform_tag(self):
+        if self.system in self.PLATFORM_TAGS:
+            return self.PLATFORM_TAGS[self.system]
+        raise BuildError("Unsupported platform: %s" % self.system)
+
+    @property
+    def release_dir(self):
+        return os.path.join(self.root_dir, "release")
+
+    @property
+    def should_upload_docker(self) -> bool:
+        return all([
+            (self.is_prod_release or self.branch == "master"),
+            self.should_build_docker,
+            self.has_docker_creds,
+        ])
+
+    @property
+    def should_upload_pypi(self) -> bool:
+        return all([
+            self.is_prod_release,
+            self.should_build_wheel,
+            self.has_twine_creds,
+        ])
+
+    @property
+    def tag(self):
+        return self.travis_tag or self.appveyor_repo_tag_name
+
+    @property
+    def upload_dir(self):
+        if self.tag:
+            return self.version
+        else:
+            return "branches/%s" % self.version
+
+    @property
+    def version(self):
+        name = self.tag or self.branch
+        if not name:
+            raise BuildError("We're on neither a tag nor a branch - could not establish version")
+        return name
 
 
 def build_wheel(be: BuildEnviron):  # pragma: no cover
@@ -251,7 +291,7 @@ def build_docker_image(be: BuildEnviron, whl: str):  # pragma: no cover
     subprocess.check_call([
         "docker",
         "build",
-        "--tag", "mitmproxy/mitmproxy/{}".format(be.docker_tag),
+        "--tag", be.docker_tag,
         "--build-arg", "WHEEL_MITMPROXY={}".format(whl),
         "--build-arg", "WHEEL_BASENAME_MITMPROXY={}".format(os.path.basename(whl)),
         "--file", "docker/Dockerfile",
@@ -340,6 +380,56 @@ def build_pyinstaller(be: BuildEnviron):  # pragma: no cover
         click.echo("Packed {}.".format(be.archive_name(bdist)))
 
 
+def build_wininstaller(be: BuildEnviron):  # pragma: no cover
+    click.echo("Building wininstaller package...")
+
+    IB_VERSION = "18.5.2"
+    IB_DIR = pathlib.Path(be.release_dir) / "installbuilder"
+    IB_SETUP = IB_DIR / "setup" / f"{IB_VERSION}-installer.exe"
+    IB_CLI = fr"C:\Program Files (x86)\BitRock InstallBuilder Enterprise {IB_VERSION}\bin\builder-cli.exe"
+    IB_LICENSE = IB_DIR / "license.xml"
+
+    if True or not os.path.isfile(IB_CLI):
+        if not os.path.isfile(IB_SETUP):
+            click.echo("Downloading InstallBuilder...")
+
+            def report(block, blocksize, total):
+                done = block * blocksize
+                if round(100 * done / total) != round(100 * (done - blocksize) / total):
+                    click.secho(f"Downloading... {round(100*done/total)}%")
+
+            urllib.request.urlretrieve(
+                f"https://installbuilder.bitrock.com/installbuilder-enterprise-{IB_VERSION}-windows-installer.exe",
+                IB_SETUP.with_suffix(".tmp"),
+                reporthook=report
+            )
+            shutil.move(IB_SETUP.with_suffix(".tmp"), IB_SETUP)
+
+        click.echo("Install InstallBuilder...")
+        subprocess.run([str(IB_SETUP), "--mode", "unattended", "--unattendedmodeui", "none"],
+                       check=True)
+        assert os.path.isfile(IB_CLI)
+
+    click.echo("Decrypt InstallBuilder license...")
+    f = cryptography.fernet.Fernet(be.rtool_key.encode())
+    with open(IB_LICENSE.with_suffix(".xml.enc"), "rb") as infile, open(IB_LICENSE,
+                                                                        "wb") as outfile:
+        outfile.write(f.decrypt(infile.read()))
+
+    click.echo("Run InstallBuilder...")
+    subprocess.run([
+        IB_CLI,
+        "build",
+        str(IB_DIR / "mitmproxy.xml"),
+        "windows",
+        "--license", str(IB_LICENSE),
+        "--setvars", f"project.version={be.version}",
+        "--verbose"
+    ], check=True)
+    assert os.path.isfile(
+        os.path.join(be.dist_dir, f"mitmproxy-{be.version}-windows-installer.exe"))
+
+
 @click.group(chain=True)
 def cli():  # pragma: no cover
     """
@@ -356,6 +446,7 @@ def build():  # pragma: no cover
     be = BuildEnviron.from_env()
     be.dump_info()
 
+    be.check_version()
     os.makedirs(be.dist_dir, exist_ok=True)
 
     if be.should_build_wheel:
@@ -365,6 +456,8 @@ def build():  # pragma: no cover
             build_docker_image(be, whl)
     if be.should_build_pyinstaller:
         build_pyinstaller(be)
+    if be.should_build_wininstaller and be.rtool_key:
+        build_wininstaller(be)
 
 
 @cli.command("upload")
@@ -404,20 +497,7 @@ def upload():  # pragma: no cover
             "-u", be.docker_username,
             "-p", be.docker_password,
         ])
-        subprocess.check_call([
-            "docker",
-            "push",
-            "mitmproxy/mitmproxy:{}".format(be.docker_tag),
-        ])
-
-
-@cli.command("decrypt")
-@click.argument('infile', type=click.File('rb'))
-@click.argument('outfile', type=click.File('wb'))
-@click.argument('key', envvar='RTOOL_KEY')
-def decrypt(infile, outfile, key):  # pragma: no cover
-    f = cryptography.fernet.Fernet(key.encode())
-    outfile.write(f.decrypt(infile.read()))
+        subprocess.check_call(["docker", "push", be.docker_tag])
 
 
 if __name__ == "__main__":  # pragma: no cover
